@@ -25,6 +25,7 @@
 #include <riscv.h>
 #include <rng_support.h>
 #include <sbi.h>
+#include <sbi_mpxy_rpmi.h>
 #include <stdalign.h>
 #include <stdio.h>
 #include <trace.h>
@@ -201,9 +202,133 @@ __weak void boot_primary_init_core_ids(void)
 #endif
 }
 
+/*
+ * fdt_get_reqfwd_hartid_by_channel_id - Find hartid for a reqfwd channel
+ * @fdt: pointer to device tree blob
+ * @channel_id: MPXY channel ID to search for
+ * @hartid: pointer to store the found hartid
+ *
+ * This function searches the device tree for "riscv,sbi-mpxy-reqfwd" nodes
+ * with the specified channel ID, then extracts the hartid from the parent
+ * CPU node's 'reg' property.
+ * DT example:
+ *   cpu0: cpu@0 {
+ *       reg = <0x0>;  // hartid = 0
+ *       ...
+ *       rpmi_optee_0 {
+ *           compatible = "riscv,sbi-mpxy-optee";
+ *           riscv,sbi-mpxy-channel-id = <0x0>;
+ *           opensbi-domain-instance = <&tdomain>;
+ *       };
+ *       rpmi_reqfwd_0 {
+ *           compatible = "riscv,sbi-mpxy-reqfwd";
+ *           riscv,sbi-mpxy-channel-id = <0x10>;
+ *       };
+ *   };
+ * Returns: 0 on success, -1 on error
+ */
+static int fdt_get_reqfwd_hartid_by_channel_id(const void *fdt,
+						uint32_t channel_id,
+						uint32_t *hartid)
+{
+	int reqfwd_offset = -1;
+	int cpu_offset = 0;
+	const fdt32_t *val = NULL;
+	const fdt32_t *reg = NULL;
+	int len = 0;
+
+	if (!fdt || !hartid)
+		return -1;
+
+	/* Loop over each "riscv,sbi-mpxy-reqfwd" node */
+	reqfwd_offset = fdt_node_offset_by_compatible(fdt, -1,
+						      "riscv,sbi-mpxy-reqfwd");
+	while (reqfwd_offset >= 0) {
+		/* Get channel ID from this reqfwd node */
+		val = fdt_getprop(fdt, reqfwd_offset,
+				  "riscv,sbi-mpxy-channel-id", &len);
+		if (!val || len < (int)sizeof(fdt32_t)) {
+			EMSG("reqfwd node missing riscv,sbi-mpxy-channel-id property");
+			return -1;
+		}
+		if (fdt32_to_cpu(*val) == channel_id) {
+			/* Found matching channel, get parent CPU node */
+			cpu_offset = fdt_parent_offset(fdt, reqfwd_offset);
+			if (cpu_offset < 0) {
+				EMSG("Failed to get parent CPU node");
+				return -1;
+			}
+
+			/* Parse hartid from CPU node's reg property */
+			reg = fdt_getprop(fdt, cpu_offset, "reg", &len);
+			if (!reg || len < (int)sizeof(fdt32_t)) {
+				EMSG("CPU node missing reg property");
+				return -1;
+			}
+
+			*hartid = fdt32_to_cpu(*reg);
+			return 0;
+		}
+
+		/* Continue searching for next reqfwd node */
+		reqfwd_offset = fdt_node_offset_by_compatible(fdt, reqfwd_offset,
+							      "riscv,sbi-mpxy-reqfwd");
+	}
+
+	return -1;
+}
+
+static void boot_primary_init_sbi_mpxy(void)
+{
+	struct sbi_mpxy_rpmi_channel *channel = NULL;
+	const void *fdt = get_external_dt();
+	uint32_t hartid = 0, i = 0;
+	int ret = 0;
+
+	sbi_mpxy_rpmi_probe_channels();
+
+	if (!fdt) {
+		EMSG("Failed to get device tree");
+		return;
+	}
+
+	/* Assign request forward channels to specific harts */
+	for (i = 0; i < sbi_mpxy_rpmi_ctx->channel_count; i++) {
+		channel = &sbi_mpxy_rpmi_ctx->channels[i];
+		if (channel->rpmi_attrs.servicegroup_id !=
+		    RPMI_SRVGRP_REQUEST_FORWARD) {
+			continue;
+		}
+
+		ret = fdt_get_reqfwd_hartid_by_channel_id(fdt,
+							  channel->channel_id,
+							  &hartid);
+		if (ret) {
+			EMSG("Failed to find hartid for reqfwd channel %u",
+			     channel->channel_id);
+			continue;
+		}
+
+		channel->hart_id = hartid;
+		DMSG("Bound RPMI reqfwd channel %u to hart%u",
+		     channel->channel_id, hartid);
+	}
+}
+
 /* May be overridden in plat-$(PLATFORM)/main.c */
 __weak void boot_secondary_init_intc(void)
 {
+}
+
+static void boot_secondary_init_sbi_mpxy(void)
+{
+	int ret = 0;
+
+	ret = sbi_mpxy_set_shmem(sbi_mpxy_rpmi_ctx->mpxy_shmem_size);
+	if (ret) {
+		EMSG("Failed to set MPXY shared memory");
+		return;
+	}
 }
 
 void boot_init_primary_early(void)
@@ -230,6 +355,9 @@ void __weak boot_init_primary_runtime(void)
 	assert(pos == 0);
 
 	thread_init_primary();
+#ifdef CFG_RISCV_SBI_MPXY
+	boot_primary_init_sbi_mpxy();
+#endif
 	IMSG("OP-TEE version: %s", core_v_str);
 	if (IS_ENABLED(CFG_INSECURE)) {
 		IMSG("WARNING: This OP-TEE configuration might be insecure!");
@@ -277,6 +405,9 @@ static void init_secondary_helper(void)
 
 	thread_init_per_cpu();
 	boot_secondary_init_intc();
+#ifdef CFG_RISCV_SBI_MPXY
+	boot_secondary_init_sbi_mpxy();
+#endif
 
 	IMSG("Secondary CPU%zu (hart%"PRIu32") initialized",
 	     pos, thread_get_hartid());
