@@ -1264,6 +1264,10 @@ $(eval $(call cfg-depends-all,CFG_WIDEVINE_HUK,CFG_DT))
 CFG_WIDEVINE_PTA ?= n
 $(eval $(call cfg-depends-all,CFG_WIDEVINE_PTA,CFG_DT CFG_WIDEVINE_HUK))
 
+# When enabled, CFG_BOOT_ROT_PTA embeds a PTA keeping the verified boot root of
+# trust that the bootloader sets once per boot, for TAs such as KeyMint.
+CFG_BOOT_ROT_PTA ?= n
+
 # When enabled, CFG_VERAISON_ATTESTATION_PTA embeds remote attestation PTA
 # service. Note: This is an experimental feature and should be used
 # with caution in production environments.
