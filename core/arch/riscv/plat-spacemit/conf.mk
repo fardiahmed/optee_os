@@ -53,3 +53,6 @@ supported-ta-targets = ta_rv64
 CFG_TDDRAM_START ?= 0x36000000
 CFG_TDDRAM_SIZE  ?= 0x02000000
 CFG_TEE_RAM_VA_SIZE ?= 0x00200000
+
+# Verified boot root of trust from U-Boot, for the KeyMint TA
+CFG_BOOT_ROT_PTA ?= y
