@@ -24,6 +24,7 @@
 #include <platform_config.h>
 #include <riscv.h>
 #include <rng_support.h>
+#include <kernel/delay.h>
 #include <sbi.h>
 #include <sbi_mpxy_rpmi.h>
 #include <stdalign.h>
@@ -67,11 +68,15 @@ static void update_external_dt(void)
 #endif /*!CFG_DT*/
 
 #ifdef CFG_RISCV_S_MODE
+#define SECONDARY_WAIT_US	100
+#define SECONDARY_WAIT_LOOPS	10000	/* 1 s */
+
 static void start_secondary_cores(void)
 {
 	uint32_t curr_hartid = thread_get_core_local()->hart_id;
 	enum sbi_hsm_hart_state status = 0;
 	uint32_t hartid = 0;
+	unsigned int n = 0;
 	int rc = 0;
 	int i = 0;
 
@@ -84,14 +89,23 @@ static void start_secondary_cores(void)
 		if (hartid == curr_hartid)
 			continue;
 
-		rc = sbi_hsm_hart_get_status(hartid, &status);
+		/* A hart may still be finishing its OpenSBI warm boot: wait for it */
+		for (n = 0; n < SECONDARY_WAIT_LOOPS; n++) {
+			rc = sbi_hsm_hart_get_status(hartid, &status);
+			if (rc || status == SBI_HSM_STATE_STOPPED)
+				break;
+			udelay(SECONDARY_WAIT_US);
+		}
 		/*
 		 * Skip if the hartid is not an assigned hart
 		 * of the trusted domain, or its HSM state is
 		 * not stopped.
 		 */
-		if (rc || status != SBI_HSM_STATE_STOPPED)
+		if (rc || status != SBI_HSM_STATE_STOPPED) {
+			EMSG("Secondary hart%"PRIu32" not available (rc %d, state %d)",
+			     hartid, rc, status);
 			continue;
+		}
 
 		DMSG("Bringing up secondary hart%"PRIu32, hartid);
 
@@ -100,6 +114,16 @@ static void start_secondary_cores(void)
 			EMSG("Error starting secondary hart%"PRIu32, hartid);
 			panic();
 		}
+
+		/* One hart at a time through the domain switch: wait until it left */
+		for (n = 0; n < SECONDARY_WAIT_LOOPS; n++) {
+			if (sbi_hsm_hart_get_status(hartid, &status) ||
+			    status == SBI_HSM_STATE_STOPPED)
+				break;
+			udelay(SECONDARY_WAIT_US);
+		}
+		if (n == SECONDARY_WAIT_LOOPS)
+			EMSG("Secondary hart%"PRIu32" did not return", hartid);
 	}
 }
 #endif
